@@ -186,11 +186,11 @@ int MatchFontFaceWithFallback(const std::string& face,
       }
       const std::string filename = sysroot + c_filename;
 
-      // We only want to return sfnt (TrueType) based fonts. We don't have a
-      // very good way of detecting this so we'll filter based on the
-      // filename.
+      // Only return SFNT-based fonts, including OpenType fonts with CFF
+      // outlines. Use the filename extension as a heuristic.
       bool is_sfnt = false;
-      static const char kSFNTExtensions[][5] = {".ttf", ".otc", ".TTF", ".ttc"};
+      static const char kSFNTExtensions[][5] = {".ttf", ".otc", ".TTF",
+                                                ".ttc", ".otf", ".OTF"};
       for (const char* extension : kSFNTExtensions) {
         if (base::EndsWith(filename, extension, base::CompareCase::SENSITIVE)) {
           is_sfnt = true;

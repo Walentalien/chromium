@@ -4,6 +4,8 @@
 
 #include "components/services/font/public/cpp/font_loader.h"
 
+#include <memory>
+#include <tuple>
 #include <utility>
 
 #include "base/containers/span.h"
@@ -19,9 +21,14 @@
 #include "third_party/skia/include/core/SkFontStyle.h"
 
 #if BUILDFLAG(ENABLE_PDF)
+#include <fontconfig/fontconfig.h>
+#include <freetype/freetype.h>
 #include <ft2build.h>
 
-#include <freetype/freetype.h>
+#include "base/base_paths.h"
+#include "base/files/file_util.h"
+#include "base/files/scoped_temp_dir.h"
+#include "base/path_service.h"
 #include "third_party/pdfium/public/fpdf_sysfontinfo.h"
 #endif  // BUILDFLAG(ENABLE_PDF)
 
@@ -259,6 +266,74 @@ TEST_F(FontLoaderTest, PdfFallback) {
     EXPECT_TRUE(result_file.IsValid());
     EXPECT_EQ(GetPostscriptNameFromFile(result_file),
               std::get<2>(family_charset_expectation));
+  }
+}
+
+TEST_F(FontLoaderTest, PdfFallbackOtf) {
+  base::ScopedTempDir temp_dir;
+  ASSERT_TRUE(temp_dir.CreateUniqueTempDir());
+
+  // Exercise both extensions with SFNT fonts containing TrueType outlines.
+  const std::pair<const char*, const char*> kTestFontFiles[] = {
+      {"Tinos-Regular", "Tinos-Regular.otf"},
+      {"Tinos-Bold", "Tinos-Bold.otf"},
+      {"Tinos-Italic", "Tinos-Italic.OTF"},
+      {"Cousine-Regular", "Cousine-Regular.ttf"},
+  };
+
+  std::unique_ptr<FcConfig, decltype(&FcConfigDestroy)> config(
+      FcConfigCreate(), &FcConfigDestroy);
+  ASSERT_TRUE(config);
+  FcConfigSetSysRoot(config.get(), nullptr);
+
+  for (const auto& [postscript_name, filename] : kTestFontFiles) {
+    mojom::FontIdentityPtr font_identity;
+    ASSERT_TRUE(font_loader()->MatchFontByPostscriptNameOrFullFontName(
+        postscript_name, &font_identity));
+    ASSERT_FALSE(font_identity.is_null());
+    base::FilePath dst_path = temp_dir.GetPath().AppendASCII(filename);
+    ASSERT_TRUE(base::CopyFile(font_identity->filepath, dst_path));
+    ASSERT_TRUE(FcConfigAppFontAddFile(
+        config.get(),
+        reinterpret_cast<const FcChar8*>(dst_path.value().c_str())));
+  }
+
+  // Unlike the renamed Tinos fonts, this OpenType font contains CFF outlines.
+  base::FilePath source_root;
+  ASSERT_TRUE(
+      base::PathService::Get(base::DIR_SRC_TEST_DATA_ROOT, &source_root));
+  const base::FilePath cff_path = temp_dir.GetPath().AppendASCII("Ahem.otf");
+  ASSERT_TRUE(base::CopyFile(
+      source_root.AppendASCII("third_party/blink/web_tests/resources/Ahem.otf"),
+      cff_path));
+  ASSERT_TRUE(FcConfigAppFontAddFile(
+      config.get(),
+      reinterpret_cast<const FcChar8*>(cff_path.value().c_str())));
+
+  // Restore the process-wide configuration even if a fatal assertion fails.
+  const auto restore_config = [](FcConfig* previous) {
+    EXPECT_TRUE(FcConfigSetCurrent(previous));
+    FcConfigDestroy(previous);
+  };
+  std::unique_ptr<FcConfig, decltype(restore_config)> previous_config(
+      FcConfigReference(FcConfigGetCurrent()), restore_config);
+  ASSERT_TRUE(FcConfigSetCurrent(config.get()));
+
+  const std::tuple<const char*, bool, bool, const char*> kExpectations[] = {
+      {"Tinos", false, false, "Tinos-Regular"},
+      {"Tinos", true, false, "Tinos-Bold"},
+      {"Tinos", false, true, "Tinos-Italic"},
+      {"Cousine", false, false, "Cousine-Regular"},
+      {"Ahem", false, false, "Ahem"},
+  };
+  for (const auto& [family, is_bold, is_italic, expected_postscript_name] :
+       kExpectations) {
+    SCOPED_TRACE(expected_postscript_name);
+    base::File result_file;
+    font_loader()->MatchFontWithFallback(
+        family, is_bold, is_italic, FXFONT_DEFAULT_CHARSET, 0, &result_file);
+    ASSERT_TRUE(result_file.IsValid());
+    EXPECT_EQ(GetPostscriptNameFromFile(result_file), expected_postscript_name);
   }
 }
 #endif  // BUILDFLAG(ENABLE_PDF)
